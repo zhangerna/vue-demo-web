@@ -1,0 +1,82 @@
+pipeline {
+    agent any
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '5'))
+    }
+
+    environment {
+        APP_NAME = "nonda-saas-web"
+        APP_ENV = "nonda-static-qa"
+        APP_TIER = "frontend"
+
+        REPLICAS = "1"
+
+        DEPLOY_ENV = "qa"
+        NAMESPACE = "nonda-static-qa"
+        CONTAINER_PORT = "80"
+        SERVICE_PORT = "80"
+        DOMAIN_HOSTS = "dealerships-beta.zus.ai"
+        FORCE_HTTPS = "true"
+
+        SHORT_COMMIT = "$GIT_COMMIT".substring(0, 7)
+
+        PAKCAGE_VERSION = "0.1.0"
+
+        DOCKER_REPO = "699713854440.dkr.ecr.us-east-1.amazonaws.com/nonda/$APP_NAME"
+        DOCKER_REPO_CREDENTIAL_ID = "ecr:us-east-1:aws-nonda-credential"
+        DOCKER_DIR_BASE = "./docker"
+        DOCKER_FILE_PATH = "$DOCKER_DIR_BASE/$DEPLOY_ENV/Dockerfile"
+        DOCKER_IMAGE_TAG = "$PAKCAGE_VERSION-$DEPLOY_ENV.$BUILD_NUMBER.$SHORT_COMMIT"
+
+        DEPLOY_TEMP_DIR_BASE = "/opt/kubernetes/templates/go"
+        DEPLOY_DIR_BASE = "/opt/kubernetes/deploy"
+        APP_DEPLOY_TEMP_DIR = "$DEPLOY_TEMP_DIR_BASE"
+        APP_DEPLOY_DIR = "$DEPLOY_DIR_BASE/$APP_ENV/$APP_NAME"
+
+        DISCORD_NOTICE_URL = "https://discordapp.com/api/webhooks/545052831623675906/jExEhVnFcIyKiPlslo1sH4ZeprwT3NUe3dzw5V0JfrulTTXu2v_YSXZ1vW6BJXKVJ5nX"
+    }
+
+    stages {
+        stage('Install Packages') {
+            steps {
+                sh "sudo npm install"
+            }
+        }
+        stage('Build Packages') {
+            steps {
+                sh "sudo npm run build:qa"
+            }
+        }
+        stage('Build Docker Image') {
+            steps {
+                withDockerRegistry([credentialsId: "$DOCKER_REPO_CREDENTIAL_ID", url: "https://$DOCKER_REPO"]) {
+                    sh "docker build -f $DOCKER_FILE_PATH -t $DOCKER_REPO:$DOCKER_IMAGE_TAG ."
+                }
+            }
+        }
+        stage('Push Docker Image') {
+            steps {
+                withDockerRegistry([credentialsId: "$DOCKER_REPO_CREDENTIAL_ID", url: "https://$DOCKER_REPO"]) {
+                    sh "docker push $DOCKER_REPO:$DOCKER_IMAGE_TAG"
+                }
+            }
+        }
+        stage('Build Deploy Files') {
+            steps {
+                sh "/opt/bin/deployment -d $APP_DEPLOY_TEMP_DIR -o $APP_DEPLOY_DIR -name $APP_NAME -env $APP_ENV -tier $APP_TIER -ns $NAMESPACE -r $REPLICAS -tag $DOCKER_IMAGE_TAG -cp $CONTAINER_PORT -sp $SERVICE_PORT -h $DOMAIN_HOSTS -https=$FORCE_HTTPS"
+            }
+        }
+        stage('Deploy APP') {
+            steps {
+                sh "kubectl apply -f $APP_DEPLOY_DIR"
+            }
+        }
+    }
+
+    post {
+        success {
+            discordSend(webhookURL: "$DISCORD_NOTICE_URL",
+                    link: "$BUILD_URL", result: "SUCCESS", title: "$JOB_BASE_NAME$BUILD_DISPLAY_NAME", description: "deploy image tag => $DOCKER_REPO:$DOCKER_IMAGE_TAG")
+        }
+    }
+}
